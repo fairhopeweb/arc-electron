@@ -5,7 +5,6 @@ import url from 'url';
 import { v4 } from 'uuid';
 import { MainWindowPersist, AppHostname } from '../common/Constants.js';
 import { logger } from './Logger.js';
-import { ArcSessionRecorder } from './ArcSessionRecorder.js';
 import { WindowsPersistance } from './WindowsPersistance.js';
 import { ContextActions } from './ContextActions.js';
 
@@ -16,6 +15,8 @@ import { ContextActions } from './ContextActions.js';
 /** @typedef {import('electron').WebContents} WebContents */
 
 
+export const lastFocusedSymbol = Symbol('lastFocusedSymbol');
+export const focusQueueSymbol = Symbol('focusQueueSymbol');
 export const closedHandler = Symbol('closedHandler');
 export const movedHandler = Symbol('movedHandler');
 export const resizedHandler = Symbol('resizedHandler');
@@ -30,18 +31,6 @@ export const workspaceLocationHandler = Symbol('workspaceLocationHandler');
 export const workspaceChangeLocationHandler = Symbol('workspaceChangeLocationHandler');
 
 export class WindowsManager {
-  /**
-   * A pointer to last focused window.
-   * @type {BrowserWindow}
-   */
-  #lastFocused = undefined;
-
-  /** 
-   * A list of focused windows, in order of latest focus
-   * @type {BrowserWindow[]}
-   */
-  #focusQueue = [];
-
   /**
    * @param {ApplicationOptionsConfig} startupOptions Application startup options. 
    */
@@ -64,7 +53,6 @@ export class WindowsManager {
     this[workspaceChangeLocationHandler] = this[workspaceChangeLocationHandler].bind(this);
     
     this.workspace = new WindowsPersistance();
-    this.recorder = new ArcSessionRecorder();
     this.contextActions = new ContextActions();
 
     /** 
@@ -72,6 +60,17 @@ export class WindowsManager {
      * @type {Map<string, string>}
      */
     this.workspacesMap = new Map();
+
+    /**
+     * A pointer to last focused window.
+     * @type {BrowserWindow}
+     */
+    this[lastFocusedSymbol] = undefined;
+    /** 
+     * A list of focused windows, in order of latest focus
+     * @type {BrowserWindow[]}
+     */
+    this[focusQueueSymbol] = [];
   }
 
   /**
@@ -86,21 +85,21 @@ export class WindowsManager {
    * or undefined if the window is destroyed or undefined.
    */
   get lastFocused() {
-    if (!this.#lastFocused) {
+    if (!this[lastFocusedSymbol]) {
       return null;
     }
-    if (this.#lastFocused.isDestroyed()) {
-      this.#lastFocused = undefined;
+    if (this[lastFocusedSymbol].isDestroyed()) {
+      this[lastFocusedSymbol] = undefined;
       return null;
     }
-    return this.#lastFocused;
+    return this[lastFocusedSymbol];
   }
 
   /**
    * @return {BrowserWindow|undefined} Reference to last focused browser window that is ARC main window.
    */
   get lastArcFocused() {
-    return this.#focusQueue.find((item) => {
+    return this[focusQueueSymbol].find((item) => {
       if (item.isDestroyed()) {
         return false;
       }
@@ -209,6 +208,22 @@ export class WindowsManager {
   }
 
   /**
+   * @param {{[key: string]: string}} target
+   */
+  createArcWindowInitOptions(target) {
+    const { startupOptions } = this;
+    if (startupOptions.proxy) {
+      target.proxy = startupOptions.proxy;
+      if (startupOptions.proxyUsername) {
+        target.proxyUsername = startupOptions.proxyUsername;
+      }
+      if (startupOptions.proxyPassword) {
+        target.proxyPassword = startupOptions.proxyPassword;
+      }
+    }
+  }
+
+  /**
    * Opens a new application window.
    *
    * @param {OpenPageOptions=} [options={}] Page create options. Don't set for the default ARC window.
@@ -225,6 +240,7 @@ export class WindowsManager {
       this.workspacesMap.set(id, workspaceFile);
       params.workspaceId = id;
     }
+    this.createArcWindowInitOptions(params);
     logger.debug('[WM] Opening new window');
     const id = this.findIndex();
     let info;
@@ -244,7 +260,6 @@ export class WindowsManager {
     if (this.startupOptions.withDevtools) {
       win.webContents.openDevTools();
     }
-    this.recorder.record();
     // win.webContents.openDevTools();
     return win;
   }
@@ -441,12 +456,12 @@ export class WindowsManager {
    */
   [focusedHandler](e) {
     const win = /** @type Electron.BrowserWindow  */ (e.sender);
-    this.#lastFocused = win;
-    const index = this.#focusQueue.indexOf(win);
+    this[lastFocusedSymbol] = win;
+    const index = this[focusQueueSymbol].indexOf(win);
     if (index !== -1) {
-      this.#focusQueue.splice(index, 1);
+      this[focusQueueSymbol].splice(index, 1);
     }
-    this.#focusQueue.unshift(win);
+    this[focusQueueSymbol].unshift(win);
   }
 
   [resizedHandler](e) {
@@ -467,12 +482,12 @@ export class WindowsManager {
    */
   [closedHandler](e) {
     const win = /** @type BrowserWindow */ (e.sender);
-    if (this.#lastFocused === win) {
-      this.#lastFocused = undefined;
+    if (this[lastFocusedSymbol] === win) {
+      this[lastFocusedSymbol] = undefined;
     }
-    const focusIndex = this.#focusQueue.indexOf(win);
+    const focusIndex = this[focusQueueSymbol].indexOf(win);
     if (focusIndex !== -1) {
-      this.#focusQueue.splice(focusIndex, 1);
+      this[focusQueueSymbol].splice(focusIndex, 1);
     }
     const index = this.findWindowIndex(win);
     if (index === -1) {
